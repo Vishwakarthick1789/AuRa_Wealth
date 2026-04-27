@@ -46,16 +46,16 @@ def hash_password(password: str) -> str:
 
 def register_user(username, password):
     if not username or not password:
-        return "Username and password cannot be empty.", False
+        return "Username and password cannot be empty."
     
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, hash_password(password)))
         conn.commit()
-        return f"Registration successful for '{username}'. You can now log in.", True
+        return f"Registration successful for '{username}'. You can now log in."
     except sqlite3.IntegrityError:
-        return f"Username '{username}' already exists. Please choose another.", False
+        return f"Username '{username}' already exists. Please choose another."
     finally:
         conn.close()
 
