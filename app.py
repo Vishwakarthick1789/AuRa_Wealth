@@ -34,6 +34,13 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
     ''')
+    
+    # Migration: Add projection_years column if it doesn't exist
+    try:
+        cursor.execute("ALTER TABLE scenarios ADD COLUMN projection_years INTEGER DEFAULT 5")
+    except sqlite3.OperationalError:
+        pass # Column likely already exists
+        
     conn.commit()
     conn.close()
 
@@ -76,13 +83,15 @@ def login_user(username, password):
         return "Invalid username or password.", None
 
 # --- Forecasting Logic ---
-def simulate_growth(current_savings, monthly_income, monthly_burn_rate, risk_tolerance):
+def simulate_growth(current_savings, monthly_income, monthly_burn_rate, risk_tolerance, years):
     """
-    Simulates a time-series forecasting model (like GRU/LSTM behavior)
-    using deterministic compounding with added stochastic noise.
+    Simulates a time-series forecasting model using Geometric Brownian Motion (GBM)
+    and factors in a 2.5% annual inflation rate to calculate real purchasing power.
     """
-    months = 60 # 5 years
+    months = int(years * 12)
     monthly_savings = monthly_income - monthly_burn_rate
+    inflation_rate_annual = 0.025
+    inflation_rate_monthly = inflation_rate_annual / 12
     
     # Risk profiles defining expected annual return and volatility (standard deviation)
     risk_profiles = {
@@ -93,13 +102,13 @@ def simulate_growth(current_savings, monthly_income, monthly_burn_rate, risk_tol
     }
     
     profile = risk_profiles.get(risk_tolerance, risk_profiles["Medium (Balanced)"])
-    mu = profile["return"] / 12  # monthly expected return
+    mu = profile["return"] / 12  # monthly expected nominal return
     sigma = profile["volatility"] / np.sqrt(12) # monthly volatility
     
     dates = pd.date_range(start=datetime.datetime.now(), periods=months, freq='ME')
     
     # Set seed for reproducibility based on inputs
-    seed = int(current_savings + monthly_income) % 10000
+    seed = int(current_savings + monthly_income + years) % 10000
     np.random.seed(seed)
     
     expected_path = [current_savings]
@@ -111,10 +120,17 @@ def simulate_growth(current_savings, monthly_income, monthly_burn_rate, risk_tol
     curr_pess = current_savings
     
     for _ in range(1, months):
-        # Simulate market return for the month
-        market_return_exp = mu
-        market_return_opt = mu + (sigma * 0.5)  # Add some positive drift for optimistic
-        market_return_pess = mu - (sigma * 0.5) # Negative drift for pessimistic
+        # GBM Drift + Shock
+        shock_exp = 0  # Mean expected path has 0 shock
+        shock_opt = sigma * 1.0  # +1 Std Dev
+        shock_pess = -sigma * 1.0 # -1 Std Dev
+        
+        # Real return = Nominal return - Inflation
+        real_mu = mu - inflation_rate_monthly
+        
+        market_return_exp = real_mu + shock_exp
+        market_return_opt = real_mu + shock_opt
+        market_return_pess = real_mu + shock_pess
         
         curr_exp = (curr_exp + monthly_savings) * (1 + market_return_exp)
         curr_opt = (curr_opt + monthly_savings) * (1 + market_return_opt)
@@ -126,19 +142,21 @@ def simulate_growth(current_savings, monthly_income, monthly_burn_rate, risk_tol
         
     df = pd.DataFrame({
         "Date": dates,
-        "Expected": expected_path,
-        "Optimistic": optimistic_path,
-        "Pessimistic": pessimistic_path
+        "Expected (Real $)": expected_path,
+        "Optimistic (Real $)": optimistic_path,
+        "Pessimistic (Real $)": pessimistic_path
     })
     
     # Melt dataframe for Gradio LinePlot
-    df_melted = df.melt(id_vars=["Date"], value_vars=["Expected", "Optimistic", "Pessimistic"], 
+    df_melted = df.melt(id_vars=["Date"], value_vars=["Expected (Real $)", "Optimistic (Real $)", "Pessimistic (Real $)"], 
                         var_name="Scenario", value_name="Balance ($)")
     
-    return df_melted, round(expected_path[-1], 2)
+    total_contributed = current_savings + (monthly_savings * months)
+    
+    return df_melted, round(expected_path[-1], 2), round(total_contributed, 2)
 
 # --- Database Operations for Scenarios ---
-def save_scenario(user_state, name, savings, income, burn, risk):
+def save_scenario(user_state, name, savings, income, burn, risk, years):
     if not user_state:
         return "You must be logged in to save scenarios."
     if not name:
@@ -148,9 +166,9 @@ def save_scenario(user_state, name, savings, income, burn, risk):
     cursor = conn.cursor()
     created_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
-        INSERT INTO scenarios (user_id, scenario_name, current_savings, monthly_income, monthly_burn_rate, risk_tolerance, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (user_state["id"], name, savings, income, burn, risk, created_at))
+        INSERT INTO scenarios (user_id, scenario_name, current_savings, monthly_income, monthly_burn_rate, risk_tolerance, created_at, projection_years)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (user_state["id"], name, savings, income, burn, risk, created_at, years))
     conn.commit()
     conn.close()
     return f"Scenario '{name}' saved successfully!"
@@ -160,7 +178,7 @@ def load_user_scenarios(user_state):
         return pd.DataFrame()
     
     conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query("SELECT id, scenario_name, current_savings, monthly_income, monthly_burn_rate, risk_tolerance, created_at FROM scenarios WHERE user_id = ?", conn, params=(user_state["id"],))
+    df = pd.read_sql_query("SELECT id, scenario_name, current_savings, monthly_income, monthly_burn_rate, risk_tolerance, projection_years, created_at FROM scenarios WHERE user_id = ?", conn, params=(user_state["id"],))
     conn.close()
     return df
 
@@ -241,10 +259,13 @@ with gr.Blocks(title="Aura Wealth") as demo:
         with gr.Tab("Dashboard", id="dash_tab"):
             with gr.Row():
                 with gr.Column(scale=1):
-                    gr.Markdown("### 💸 Your Stats")
+                    gr.Markdown("### 💸 Financial Stats")
                     savings_input = gr.Slider(minimum=0, maximum=1000000, value=5000, step=100, label="Current Savings ($)")
                     income_input = gr.Slider(minimum=0, maximum=50000, value=4000, step=50, label="Monthly Income ($)")
                     burn_input = gr.Slider(minimum=0, maximum=50000, value=2500, step=50, label="Monthly Burn Rate ($)")
+                    
+                    gr.Markdown("### ⚙️ Simulation Parameters")
+                    years_input = gr.Slider(minimum=1, maximum=40, value=5, step=1, label="Projection Horizon (Years)")
                     risk_input = gr.Radio(
                         choices=["Low (Conservative)", "Medium (Balanced)", "High (Aggressive)", "Degen (Crypto/Options)"],
                         value="Medium (Balanced)",
@@ -259,12 +280,12 @@ with gr.Blocks(title="Aura Wealth") as demo:
                     save_msg = gr.Markdown("")
                     
                 with gr.Column(scale=2):
-                    gr.Markdown("### 📈 5-Year Wealth Projection")
+                    gr.Markdown("### 📈 Wealth Projection (Inflation Adjusted)")
                     plot_output = gr.LinePlot(
                         x="Date",
                         y="Balance ($)",
                         color="Scenario",
-                        title="Wealth Growth Over 5 Years",
+                        title="Real Wealth Growth (Adjusted for 2.5% Annual Inflation)",
                         tooltip=["Date", "Balance ($)", "Scenario"]
                     )
                     summary_output = gr.Markdown("")
@@ -274,9 +295,12 @@ with gr.Blocks(title="Aura Wealth") as demo:
             gr.Markdown("### 📂 Your Saved Financial Scenarios")
             refresh_btn = gr.Button("🔄 Refresh List")
             scenarios_table = gr.Dataframe(
-                headers=["ID", "Name", "Savings", "Income", "Burn Rate", "Risk", "Created At"],
+                headers=["ID", "Name", "Savings", "Income", "Burn Rate", "Risk", "Years", "Created At"],
                 interactive=False
             )
+            
+    gr.Markdown("---")
+    gr.Markdown("<p style='text-align: center; color: #64748b; font-size: 0.8rem;'><b>Disclaimer:</b> Projections are generated using a Geometric Brownian Motion model assuming a 2.5% annual inflation rate to reflect real purchasing power. This is an AI simulation and does not constitute professional financial advice. Market investments carry risk.</p>")
 
     # --- Interactions ---
     
@@ -301,22 +325,24 @@ with gr.Blocks(title="Aura Wealth") as demo:
     )
     
     # Forecasting
-    def handle_forecast(savings, income, burn, risk):
+    def handle_forecast(savings, income, burn, risk, years):
         if burn > income:
             return None, "⚠️ **Warning**: Burn rate exceeds income. You are losing money every month! Adjust inputs."
-        df, final_val = simulate_growth(savings, income, burn, risk)
-        return df, f"### 🎯 Expected Balance in 5 Years: **${final_val:,.2f}**"
+        df, final_val, total_contrib = simulate_growth(savings, income, burn, risk, years)
+        
+        summary = f"### 🎯 Expected Real Balance in {years} Years: **${final_val:,.2f}**\\n*(Total Cash Contributed: ${total_contrib:,.2f})*"
+        return df, summary
         
     forecast_btn.click(
         fn=handle_forecast,
-        inputs=[savings_input, income_input, burn_input, risk_input],
+        inputs=[savings_input, income_input, burn_input, risk_input, years_input],
         outputs=[plot_output, summary_output]
     )
     
     # Saving Scenarios
     save_btn.click(
         fn=save_scenario,
-        inputs=[user_state, scenario_name, savings_input, income_input, burn_input, risk_input],
+        inputs=[user_state, scenario_name, savings_input, income_input, burn_input, risk_input, years_input],
         outputs=[save_msg]
     )
     

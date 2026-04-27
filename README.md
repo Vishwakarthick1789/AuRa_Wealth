@@ -1,6 +1,6 @@
 # 🚀 Aura Wealth - Gen Z Financial Forecaster
 
-A modern, AI-driven personal finance and wealth forecasting application. This Micro-SaaS project helps users predict their financial trajectory over the next 5 years using a robust simulation engine with an interactive, sleek UI tailored for Gen Z.
+A modern, AI-driven personal finance and wealth forecasting application. This Micro-SaaS project helps users predict their financial trajectory using a robust simulation engine (Geometric Brownian Motion) with an interactive, sleek UI tailored for Gen Z..
 
 ## 🌟 Value Proposition
 
@@ -15,16 +15,16 @@ In an age of financial uncertainty, young adults need intuitive tools to underst
 
 ## 🧠 Forecasting Module Logic
 
-The predictive analytics module simulates time-series forecasting (similar to the trajectory of GRU/LSTM models in stock prediction) using deterministic compounding enhanced with stochastic volatility.
+The predictive analytics module simulates time-series forecasting using **Geometric Brownian Motion (GBM)**—the industry standard for Monte Carlo retirement simulations—enhanced with a 2.5% annual inflation discount to reflect real purchasing power.
 
 1. **Monthly Base**: Calculates monthly savings (`Income - Burn Rate`).
 2. **Risk Profile Mapping**: 
    - Users select a risk tolerance (e.g., Conservative, Balanced, Aggressive, Degen).
    - This selection maps to a predefined expected mean return and volatility/standard deviation.
 3. **Simulation Engine**: 
-   - Calculates compound growth over 60 months.
+   - Calculates compound growth dynamically over the user-defined timeline (1 to 40 years).
    - Generates three distinct paths: **Expected** (Mean), **Optimistic** (+ Drift), and **Pessimistic** (- Drift) to represent the stochastic nature of markets.
-4. **Output**: Returns a melted Pandas DataFrame mapped to an interactive multi-line plot, empowering users to visualize potential upper and lower bounds of their financial future.
+4. **Output**: Returns a melted Pandas DataFrame mapped to an interactive multi-line plot, empowering users to visualize potential upper and lower bounds of their financial future in *real* dollars.
 
 ## 🛠️ Setup and Usage Instructions
 
